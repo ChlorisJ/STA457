@@ -1,0 +1,387 @@
+---
+title: "STA457 Assignment (Fall 2020)"
+author: "Xiaoke Jiang 1003860057"
+date: "`r Sys.Date()`"
+output: 
+  html_document: 
+    highlight: tango
+    theme: yeti
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(lubridate)
+library(xts)
+library(timeSeries)
+library(forecast)
+library(ggplot2)
+library(knitr)
+library(readxl)
+library(MASS)
+library(forecast)
+library(timeDate)
+library(sarima)
+library(gridExtra)
+
+
+PreWhiten.arma<- function(x , ar = NULL, ma = 0){
+        if(is.null(ar) && is.null(ma)) print("both ar and ma coefficients are empty!")
+        pwData = numeric(0)
+        m = as(modelCoef(new("ArmaModel", ar = ar, ma = ma)), "list")
+        eps = numeric(length(x))
+        pwData = xarmaFilter(m, x =x, eps = eps, whiten = TRUE) 
+        pwData[!is.na(pwData)]
+}
+PreWhiten.ar<- function(x , ar = NULL){
+        if(is.null(ar)) print(" autoregressive coefficients are empty!")
+        pwData = numeric(0)
+        pwData = filter(x, c(1, -ar),method=c("convo"),sides=1) 
+        pwData[!is.na(pwData)]
+}
+
+LBTest<- function(res, nPQ = 0, m = 24, ifPlot = FALSE){
+        stopifnot(nPQ >= 0, m >= 1, m > nPQ)
+        n <- length(res)
+        lags <- 1:m
+        df <- (nPQ+1):m 
+        ra <- (acf(res, lag.max = m, plot = FALSE)$acf)[-1]
+        QQ <- n * (n + 2) * cumsum((ra^2)/(n - (1:m)))[df]
+        
+        pv <- 1 - pchisq(QQ, df)
+        QQ <- round(QQ, 2)
+        a <- matrix(c(df, QQ, pv), ncol = 3)
+        dimnames(a) <- list(rep("", length(QQ)), c("m", "Qm", "pvalue"))
+        if(ifPlot){
+                plot(x = a[,1],y = a[,3],
+                     ylim = c(0,1), pch = 15, col = "lightblue",
+                     ylab = "p-value", xlab = "m",
+                     main = "Ljung-Box portmanteau test")
+                abline(h =0.05, col =2)
+                abline(h =0.01, col =4)
+                grid()
+        }else {
+                a
+        }
+}
+```
+
+
+\ \ \ \ \   
+
+1. Download delinquency rates and real GDP data from Quercus and put them into your working directory.
+
+2. Calculate the changes of real GDP using the following R codes. 
+
+
+```{r}
+CL = ts(read.csv("Assignment/DRCLACBS.csv")[,2],frequency = 4, end = c(2020,2))
+dat = read.csv("Assignment/GDPC1.csv")
+RGDP = ts(diff(dat[,2])/100,frequency = 4, end = c(2020,3))
+```
+
+
+##### Use the data between 1987 Q1 and 2018 Q3 to study the relationship between the changes of real GDP and delinquency rates.      
+
+```{r, echo=FALSE}
+#' @split training and forecasting sample
+#'
+rgdp <- window(RGDP,start=c(1987,1),end=c(2018,3))
+cl <- window(CL,start=c(1987,1),end=c(2018,3))
+
+
+#' @plot (using ts.plot or autoplot)
+#'
+autoplot(cbind(rgdp,cl))+ggtitle("Changes of real GDP and delinquency rates")+xlab("Time")+theme_minimal()
+
+
+```
+
+##### Model this relationship using the transfer function noise model.(For simplicity, assume that both delinquency rates and changes of real GDP are stationary.)
+
+Your analyses should include:         
+
+1. Conduct `prewhitening` analysis to identify the lead-lag relationship between changes of real GDP and delinquency rates;          
+
+   * ARMA model for changes of real GDP and its residual ACF and PACF plots
+   * Use cross correlation plot of prewhitened processes to identify transfer function ($\nu_i$)
+   
+```{r}
+#' @prewhiten 
+#'
+mod.arma <- auto.arima(rgdp,max.p = 52, max.q = 52, stationary = TRUE)
+p=mod.arma$arma[1]
+q=mod.arma$arma[2]
+npq =sum(mod.arma$arma[c(1,2)])
+
+plot(mod.arma)
+LBTest(mod.arma$residuals, nPQ =p+q, m=52, ifPlot = TRUE)
+
+mod = mod.arma
+nAR = mod$arma[1]
+nMA = mod$arma[2]
+
+if(nMA!=0){
+  xf = PreWhiten.arma(rgdp, ar = mod$coef[1:nAR], 
+                      ma = mod$coef[(1:nMA)+nAR])[-(1:nAR)]
+  yf = PreWhiten.arma(cl, ar = mod$coef[1:nAR], 
+                      ma=mod$coef[(1:nMA)+nAR])[-(1:nAR)]  
+}else{
+  xf = PreWhiten.arma(rgdp, ar = mod$coef[1:nAR], 
+                      ma = 0)[-(1:nAR)]
+  yf = PreWhiten.arma(cl, ar = mod$coef[1:nAR], 
+                      ma=0)[-(1:nAR)] 
+}
+
+
+#' @ccf plot prewhiten x and y
+#'
+
+
+ccf(c(xf), c(yf), lwd=4, ylab="Cross-correlation functions",
+    main="CCF of prewhitened Change in GDP and delinquency rates")
+abline(v=0, col="gold", lwd=1, lty="dashed")
+
+text(-0.25,-0.2,"0",col=2)
+text(-1.25,-0.2,"-1",col=2)
+text(-2.25,-0.2,"-2",col=2)
+text(-3.25,-0.2,"-3",col=2)
+text(-4.25,-0.2,"-4",col=2)
+text(-5.25,-0.2,"-5",col=2)
+
+
+
+```
+
+
+2. Fit a multiple regression using the findings in the `prewhitening` step, i.e.
+$$y_t = \sum_i v_i x_{t-i} +\xi_t,~~~(1)$$
+where $y_t$ and $x_t$ denote the output and input process, respectively, and $\xi_t$ is the noise process.(Hint: Use `prewhitening` to select the lagged $\{x_i\}$ in the regression)
+
+
+As indicated in the above cross-correlation plot, we include xt,xt-1,xt-2,xt-3,xt-4,xt-5 in our transfer function noise model.
+
+
+
+```{r}
+#' @fit Equation (1)
+#'
+y <- CL
+x <- RGDP
+
+
+reg <- ts.intersect(y,x,lag(x,-1),lag(x,-2),lag(x,-3),lag(x,-4),lag(x,-5))
+head(reg)
+
+colnames(reg)<-c("CL","RGDP","RGDP1", "RGDP2","RGDP3","RGDP4","RGDP5")
+
+trainreg <- window(reg,start=c(1987,1),end=c(2018,3))
+lmreg <-lm(CL~RGDP+RGDP1+RGDP2+RGDP3+RGDP4+RGDP5,data = trainreg)
+summary(lmreg)
+
+#' @plot residual ACF and PACF of the above regression
+#'
+
+acfreg = lmreg$resid%>%ggAcf()+theme_minimal()
+pacfreg = lmreg$resid%>%ggPacf()+theme_minimal()
+grid.arrange(acfreg, pacfreg, nrow = 1)
+
+
+```
+
+The mathematical equation of the fitted model is:
+$$y_t=3.86949-0.12977x_t-0.13089x_{t-1}-0.11823x_{t-2}-0.10950x_{t-3}-0.13460x_{t-4}-0.16141x_{t-5}$$
+
+
+4. Fit a transfer function noise model using the rational distributed lag function, i.e. 
+$$y_t = \frac{\delta(B)}{\omega(B)}x_t+n_t,~~~(2)$$
+where $\delta(B)$ and $\omega(B)$ are polynomials in the backward shift operator $B$, and $n_t$ follows an ARMA process. Write down the mathematical representation of the fitted model.
+
+```{r}
+#' @fit Equation (2) and show the fitted model
+#'
+tnfreg <- auto.arima(trainreg[,1],xreg = trainreg[,-1],stationary = TRUE)
+summary(tnfreg)
+
+
+```
+
+* __Write down the mathematical equation of your fitted model__
+
+Mathematically, Using compact notation, the fitted model becomes:
+$$(1+0.1497B^4+0.3804B^8)(1-1.8881B+0.9023B^2)y_t=3.4561+(-0.0517-0.0570B-0.0496B^2-0.0315B^3-0.0315B^4-0.0435B^5)x_t+(1-0.5593B+0.0438B^2)a_t$$
+By rearranging this formula, we get:
+$$y_t=0.02172+\frac{-0.0517-0.0570B-0.0496B^2-0.0315B^3-0.0315B^4-0.0435B^5}{(1+0.1497B^4+0.3804B^8)(1-1.8881B+0.9023B^2)}x_t+\frac{1-0.5593B+0.0438B^2}{(1+0.1497B^4+0.3804B^8)(1-1.8881B+0.9023B^2)}a_t$$
+where $0.02172=\frac{3.4561}{(1+0.1497+0.3804)(1-1.8881+0.9023)}$
+
+5. Conduct the model adequacy tests (diagnostics) on the above models and conclude your inference.   
+
+```{r, echo=FALSE, fig.height=3}
+#' @check model adequacy of residual serial correlation for tnf model
+#'
+par(mfrow = c(1,2))
+m = 30
+lags = 1:m
+df <- (2+6+1):m
+n = length(tnfreg$residuals)
+rccf = ccf(tnfreg$residuals,mod$residuals, plot = FALSE, lag.max = m)$acf[-(1:m)]
+Qm = n* (n + 2) * cumsum((rccf^2)/(n - (0:m)))[df]
+pv <- 1 - pchisq(Qm, df)
+a = cbind(df, Qm,pv)
+LBTest(tnfreg$res, nPQ = 6, ifPlot = TRUE)
+
+
+#' @check model adequacy of residual crosss correlation for tnf model
+#'
+plot(x = a[,1],y = a[,3],ylim = c(0,1), pch = 15, col =4,ylab = "p-value", xlab = "m",main = "Cross-correlation check")
+abline(h =0.05, col =2)
+grid()
+
+```
+
+Based on the Ljung-Box portmanteau test, all p values are above the 5% significance level, which means that the residuals are independent. Based on the cross-correlation check, all the points are above the 5% significance level, which means there is no correlation between the input series and the noise for each input-output pair. Based on the two plots, the tnf model is adequate.
+
+
+```{r, echo=FALSE, fig.height=3}
+#' @check model adequacy of residual serial correlation for lm model
+#'
+par(mfrow = c(1,2))
+m = 30
+lags = 1:m
+df <- (0+6+1):m
+n = length(lmreg$residuals)
+rccf = ccf(as.numeric(mod$residuals),lmreg$residuals, plot = FALSE, lag.max = m)$acf[-(1:m)]
+Qm = n* (n + 2) * cumsum((rccf^2)/(n - (0:m)))[df]
+pv <- 1 - pchisq(Qm, df)
+a = cbind(df, Qm,pv)
+LBTest(lmreg$res, nPQ = 0, ifPlot = TRUE)
+
+#' @check model adequacy of residual crosss correlation for lm model
+#'
+
+plot(x = a[,1],y = a[,3],ylim = c(0,3), pch = 15, col =4,ylab = "p-value", xlab = "m",main = "Cross-correlation check")
+abline(h =0.05, col =2)
+grid()
+
+```
+
+Based on the Ljung-Box portmanteau test, all p values are below the 5% significance level, which means that the residuals are correlated. Based on the cross-correlation check, all the points are above the 5% significance level, which means that the input series and the noise for each input-output pair are independent. Hence the lm model is not adequate.
+
+
+\ \ \ \ 
+
+##### Conduct the out of sample forecasts of the above fitted models using the remaining observations. Calculate the forecast performance using Mean squared error (MSE), Mean absolute error (MAE), and Mean absolute percentage error (MAPE):
+$$MSE = \sqrt \frac{\sum_{i=1}^L (y_{t+i}-\hat y_t(i))^2}{L}$$
+$$MAE = \frac{\sum_{i=1}^L \left|y_{t+i}-\hat y_t(i)\right|}{L}$$
+$$MAPE = \frac{1}{L}\sum_{i=1}^L \left|1-\frac{\hat y_t(i)}{y_{t+i}}\right|,$$
+where $\hat y_t(i)$ denotes the forecast at origin $t$ with lead time $i$
+
+
+```{r}
+#' @forecast using tfn
+#'
+tst <- window(reg,start=c(2018,4))
+yobs <- as.data.frame(window(reg,start=c(2018,4)))[,1]
+yhat <- as.data.frame(forecast(tnfreg,xreg = tst[,-1]))[,1]
+
+
+#' @calculate MSE, MAE, MAPE 
+#'
+MSE <- mean((yobs-yhat)^2)
+MAE <- mean(abs(yobs-yhat))
+MAPE <- mean(abs(1-yhat/yobs))
+
+Perform <- c(MSE,MAE,MAPE)
+
+knitr::kable(Perform,caption = "TFN model")
+
+```
+
+
+\ \ \ \  
+
+##### 4. Conduct the same out of sample forecasts soley on $y_t$ using an ARIMA model. Compare and discuss its peformance metrics with the TFN model. 
+
+* __Hint:__ You may fit an ARIMA model on $y_t$ using `auto.arima` but ensure that the fitted model pass the Ljung-Box test.
+
+
+```{r}
+#' @forecat using auto.arima
+#'
+trainarma <-auto.arima(trainreg[,1])
+armafit <- forecast(trainarma,h=length(tst[,1]))
+yhat1 <- as.data.frame(armafit)[,1]
+
+#' @calculate MSE, MAE, MAPE 
+#'
+MSE1 <- mean((yobs-yhat1)^2)
+MAE1 <- mean(abs(yobs-yhat1))
+MAPE1 <- mean(abs(1-yhat1/yobs))
+
+Perform1 <- c(MSE1,MAE1,MAPE1)
+
+knitr::kable(Perform1,caption = "ARIMA model")
+
+
+
+```
+Based on my comparison, ARIMA model is better becasue all of its RMSE, MAE and MAPE value is smaller than the output from the TNF model.
+
+
+##### Conduct the same out of sample forecast analysis using forecast combination of the fitted TFN model and ARIMA model (equal weight and MSE weighting). Compare its forecast metrics with those in the previous two questions
+
+* _Forecast combination:_      
+The combined forecaster $\hat f_t(i)$ may be given by
+$$\hat f_t(i) = w_a ~ \hat y_t^{(a)}(i)+w_b~ \hat y_t^{(b)}(i),$$
+where the superscripts $(a)$ and $(b)$ stand for transfer function noise model and ARIMA model, respectively. For the equal weight scheme, $w_a = w_b = 0.5$, and for the MSE weighting scheme, its weights is the solution of
+$$\min_{w_a} \sqrt {\sum_{t=1}^n \{y_t -w_a \hat y_t^{(a)}-(1-w_a)\hat y_t^{(b)}\}^2},$$
+where $w_a, w_b \in[0,1]$, $w_a+w_b=1$, and $\hat y_t^{(a)}$ denote the fitted value at time $t$ in the training sample and $n$ is the series length.
+
+```{r}
+#' @calculate MSE, MAE, MAPE for the equal weight forecast
+#'
+equalweight <- yobs-0.5*yhat-0.5*yhat1
+equalweight
+
+MSEe <- mean((yobs-equalweight)^2)
+MAEe <- mean(abs(yobs-equalweight))
+MAPEe <- mean(abs(1-equalweight/yobs))
+
+Performe <- c(MSEe,MAEe,MAPEe)
+
+knitr::kable(Performe,caption = "Equal weight model")
+
+```
+
+```{r}
+#' @calculate MSE scheme weight
+#'
+f=function(w){
+  sqrt(sum(yobs-w*yhat-(1-w)*yhat1)^2)
+}
+
+optimize(f,c(0,1),maximum = FALSE)
+
+#w=6.610696*10^-5
+
+#' @calculate MSE, MAE, MAPE for the above combination forecast
+#'
+
+schemeweight <- yobs-(6.610696*10^-5)*yhat-(1-6.610696*10^-5)*yhat1
+schemeweight 
+
+MSEs <- mean((yobs-schemeweight)^2)
+MAEs <- mean(abs(yobs-schemeweight ))
+MAPEs <- mean(abs(1-schemeweight/yobs))
+
+Performs <- c(MSEs,MAEs,MAPEs)
+
+knitr::kable(Performs,caption = "Scheme weight model")
+
+
+
+```
+By comparing the four output, we can see that the ARIMA model is the best in four models. The MSE scheme weight model performs slightly better than the equal weight model.
+
+* __Reference:__ William W.S. Wei (2006), _Time Series Analysis--Univariate and Multivariate Methods_, Second Edition. (Chapter 14)
+
